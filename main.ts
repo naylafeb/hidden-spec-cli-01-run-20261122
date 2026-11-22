@@ -852,6 +852,43 @@ function jsonEdits(text: string, lines: string[]): Edit[] {
 /* Sections 1, 2 and 10: the command line, output and atomicity.      */
 /* ------------------------------------------------------------------ */
 
+/** The change rows for the tree's current edits: renames first, then the
+ *  A/D/M rows for every other changed path, all sorted by path bytes. */
+function changeRows(tree: Tree): { key: string; line: string }[] {
+  const rows: { key: string; line: string }[] = [];
+  const rPairs: [string, string][] = [];
+  for (const [o, n] of tree.moves) {
+    if (tree.original(o) !== null && tree.get(o) === null && tree.original(n) === null && tree.get(n) !== null) rPairs.push([o, n]);
+  }
+  const rOld = new Set(rPairs.map(([o]) => o));
+  const rNew = new Set(rPairs.map(([, n]) => n));
+  for (const [o, n] of rPairs) rows.push({ key: n, line: `R ${o} -> ${n}` });
+  for (const p of [...tree.now.keys()].sort((a, b) => Buffer.compare(Buffer.from(a), Buffer.from(b)))) {
+    if (rOld.has(p) || rNew.has(p)) continue;
+    const was = tree.original(p);
+    const now = tree.now.get(p)!;
+    if (was === now) continue;
+    rows.push({ key: p, line: `${was === null ? 'A' : now === null ? 'D' : 'M'} ${p}` });
+  }
+  rows.sort((a, b) => Buffer.compare(Buffer.from(a.key), Buffer.from(b.key)));
+  return rows;
+}
+
+/** Write the tree's changed files to disk: deletes and creates, with parent
+ *  directories made as needed. Paths the edits left unchanged are skipped. */
+function applyChanges(tree: Tree): void {
+  for (const p of [...tree.now.keys()].sort((a, b) => Buffer.compare(Buffer.from(a), Buffer.from(b)))) {
+    const was = tree.original(p);
+    const now = tree.now.get(p)!;
+    if (was === now) continue;
+    if (now === null) rmSync(p, { force: true });
+    else {
+      mkdirSync(dirname(p), { recursive: true });
+      writeFileSync(p, now);
+    }
+  }
+}
+
 function run(args: string[]): { code: number; out: string[] } {
   let format: string | null = null;
   let check = false;
@@ -910,34 +947,8 @@ function run(args: string[]): { code: number; out: string[] } {
     }
   }
   if (fails.length > 0) return { code: 1, out: [...fails.map((f) => `error: ${f.code} ${f.path}`), `failed: ${fails.length} of ${edits.length} edits`] };
-  const rows: { key: string; line: string }[] = [];
-  const rPairs: [string, string][] = [];
-  for (const [o, n] of tree.moves) {
-    if (tree.original(o) !== null && tree.get(o) === null && tree.original(n) === null && tree.get(n) !== null) rPairs.push([o, n]);
-  }
-  const rOld = new Set(rPairs.map(([o]) => o));
-  const rNew = new Set(rPairs.map(([, n]) => n));
-  for (const [o, n] of rPairs) rows.push({ key: n, line: `R ${o} -> ${n}` });
-  for (const p of [...tree.now.keys()].sort((a, b) => Buffer.compare(Buffer.from(a), Buffer.from(b)))) {
-    if (rOld.has(p) || rNew.has(p)) continue;
-    const was = tree.original(p);
-    const now = tree.now.get(p)!;
-    if (was === now) continue;
-    rows.push({ key: p, line: `${was === null ? 'A' : now === null ? 'D' : 'M'} ${p}` });
-  }
-  rows.sort((a, b) => Buffer.compare(Buffer.from(a.key), Buffer.from(b.key)));
-  if (!check) {
-    for (const p of [...tree.now.keys()].sort((a, b) => Buffer.compare(Buffer.from(a), Buffer.from(b)))) {
-      const was = tree.original(p);
-      const now = tree.now.get(p)!;
-      if (was === now) continue;
-      if (now === null) rmSync(p, { force: true });
-      else {
-        mkdirSync(dirname(p), { recursive: true });
-        writeFileSync(p, now);
-      }
-    }
-  }
+  const rows = changeRows(tree);
+  if (!check) applyChanges(tree);
   return { code: 0, out: [...rows.map((r) => r.line), `ok: ${rows.length} ${rows.length === 1 ? 'file' : 'files'}`] };
 }
 
